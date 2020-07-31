@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grpc-helloworld
+  labels:
+    app: grpc-helloworld
+spec:
+  ports:
+    - name: grpc
+      port: 50051
+  selector:
+    app: grpc-helloworld
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: grpc-helloworld
+  name: grpc-helloworld
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: grpc-helloworld
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/userVolume: '[{"name":"descriptor","configMap":{"name":"hello-descriptor","items":[{"key":"descriptor.bin","path":"descriptor.bin"}]}}]'
+        sidecar.istio.io/userVolumeMount: '[{"name":"descriptor","mountPath":"/etc/envoy"}]'
+      labels:
+        app: grpc-helloworld
+      name: grpc-helloworld
+    spec:
+      containers:
+        - name: grpc-helloworld
+          image: eu.gcr.io/dev-vml-cm/istio-hello-grpc
+          command: ["/app/server"]
+          resources:
+        #   readinessProbe:
+        #     exec:
+        #       command: ["grpc-health-probe", "-addr=:50051"]
+        #   livenessProbe:
+        #     exec:
+        #       command: ["grpc-health-probe", "-addr=:50051"]
+          ports:
+            - containerPort: 50051
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: grpc-helloworld
+spec:
+  gateways:
+  - istio-system/ingress
+  hosts:
+  - '*'
+  http:
+  - match:
+    - uri:
+        prefix: /helloworld.Greeter
+    route:
+    - destination:
+        host: grpc-helloworld
+        port:
+          number: 50051
+  - match:
+    - uri:
+        prefix: /v1/greet:hello
+    route:
+    - destination:
+        host: grpc-helloworld
+        port:
+          number: 50051
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: EnvoyFilter
+metadata:
+  name: hello-json-transcode
+spec:
+  workloadSelector:
+    labels:
+      app: grpc-helloworld
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        listener:
+          portNumber: 50051
+          filterChain:
+            filter:
+              name: "envoy.http_connection_manager"
+              subFilter:
+                name: "envoy.router"
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.grpc_json_transcoder
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+            proto_descriptor: "/etc/envoy/descriptor.bin"
+            services: ["helloworld.Greeter"]
+            print_options:
+              always_print_primitive_fields: false
+              always_print_enums_as_ints: false
+              preserve_proto_field_names: false
